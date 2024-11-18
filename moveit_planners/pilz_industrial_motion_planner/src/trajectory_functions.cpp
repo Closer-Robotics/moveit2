@@ -226,7 +226,7 @@ bool pilz_industrial_motion_planner::generateJointTrajectory(
     joint_velocity_last[item.first] = 0.0;
   }
 
-  for (std::vector<double>::const_iterator time_iter = time_samples.begin(); time_iter != time_samples.end();
+  for (auto time_iter = time_samples.begin(); time_iter != time_samples.end();
        ++time_iter)
   {
     tf2::transformKDLToEigen(trajectory.Pos(*time_iter), pose_sample);
@@ -252,17 +252,44 @@ bool pilz_industrial_motion_planner::generateJointTrajectory(
       duration_current_sample = *time_iter;
     }
 
-    // skip the first sample with zero time from start for limits checking
     if (time_iter != time_samples.begin() &&
         !verifySampleJointLimits(ik_solution_last, joint_velocity_last, ik_solution, sampling_time,
                                  duration_current_sample, joint_limits))
     {
-      RCLCPP_ERROR_STREAM(LOGGER, "Inverse kinematics solution at "
-                                      << *time_iter
-                                      << "s violates the joint velocity/acceleration/deceleration limits.");
-      error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
-      joint_trajectory.points.clear();
-      return false;
+      // Adjust time sampling to meet velocity and acceleration limits
+      double max_violation = 0.0;
+
+      for (const auto& joint : ik_solution)
+      {
+        double joint_velocity = std::abs((joint.second - ik_solution_last.at(joint.first)) / duration_current_sample);
+        double velocity_limit = joint_limits.getLimit(joint.first).max_velocity;
+        if (joint_velocity > velocity_limit)
+        {
+          double required_time = std::abs(joint.second - ik_solution_last.at(joint.first)) / velocity_limit;
+          max_violation = std::max(max_violation, required_time - duration_current_sample);
+        }
+
+        if (joint_limits.getLimit(joint.first).has_acceleration_limits)
+        {
+          double joint_acceleration = std::abs(
+              (joint_velocity - joint_velocity_last.at(joint.first)) / (duration_current_sample + sampling_time) * 2);
+          double acceleration_limit = joint_limits.getLimit(joint.first).max_acceleration;
+          if (joint_acceleration > acceleration_limit)
+          {
+            double required_time = std::sqrt(std::abs(joint.second - ik_solution_last.at(joint.first)) /
+                                            acceleration_limit);
+            max_violation = std::max(max_violation, required_time - duration_current_sample);
+          }
+        }
+      }
+
+      *time_iter += max_violation;
+      // RCLCPP_ERROR_STREAM(LOGGER, "Inverse kinematics solution at "
+      //                                 << *time_iter
+      //                                 << "s violates the joint velocity/acceleration/deceleration limits.");
+      // error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+      // joint_trajectory.points.clear();
+      // return false;
     }
 
     // fill the point with joint values
